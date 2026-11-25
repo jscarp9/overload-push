@@ -5,11 +5,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "TIMER", "class_name": "RestTimer" },
-      { "name": "CREW", "class_name": "Crew" }
+      { "name": "CREW", "class_name": "Crew" },
+      { "name": "VAULT", "class_name": "Vault" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RestTimer"] },
-    { "tag": "v2", "new_sqlite_classes": ["Crew"] }
+    { "tag": "v2", "new_sqlite_classes": ["Crew"] },
+    { "tag": "v3", "new_sqlite_classes": ["Vault"] }
   ]
 }
