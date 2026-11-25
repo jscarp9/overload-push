@@ -1,4 +1,4 @@
-// Overload server: rest alerts, crew, accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
+// Overload server 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
 // Bindings: TIMER (RestTimer), CREW (Crew), VAULT (Vault). Secret: VAPID_PRIVATE.
 
 const ORIGIN = 'https://jscarp9.github.io';
@@ -232,7 +232,7 @@ export class Vault {
         return json({ ok: true, passkeys: meta.creds.length });
       }
       case '/signout': { const h = await sha(String(b.token)); meta.tokens = meta.tokens.filter(x => x !== h); await s.put('meta', meta); return json({ ok: true }); }
-      case '/delete': await s.deleteAll(); return json({ ok: true, deleted: true });
+      case '/delete': return json({ error: 'Account deletion is turned off' }, 403);
       case '/info': return json({ created: meta.created, passkeys: meta.creds.length, devices: meta.tokens.length, seq: meta.seq });
       case '/sync': return json(await this.sync(meta, b));
       case '/snaps': return json({ days: ((await s.get('snapIdx')) || []).slice().reverse() });
@@ -304,6 +304,14 @@ function mergeSession(cur, inc) {
 
 /* ---------- Crew ---------- */
 const BANNERS = { steel: 1, ember: 2, ocean: 3, toxic: 5, royal: 7, gold: 10 };
+// 0.14 animated scene banners: unlocked by crew level (lv), crew rank (rank) or a crew trophy (trophy)
+const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 } };
+const CREST = { shape: ['shield', 'plate', 'circle', 'hex'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'] };
+const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart'];
+const CREW_RANK_PTS = [0, 400, 1200, 2500, 4500, 7500, 11500, 17000];
+const DAY = 864e5, TRASH_KEEP = 30 * DAY, ARCHIVE_KEEP = 90 * DAY, CREW_SNAPS = 30, PAGE = 100;
+const crewRankOf = c => { const pts = (c.xp || 0) + Object.keys(c.trophies || {}).length * 400; let r = 0; CREW_RANK_PTS.forEach((t, i) => { if (pts >= t) r = i; }); return r; };
+const toLb = (v, u) => u === 'kg' ? v * 2.20462 : v;
 const crewLevel = xp => 1 + Math.floor(Math.sqrt((xp || 0) / 60));
 export class Crew {
   constructor(state, env) { this.state = state; this.env = env; }
@@ -315,10 +323,58 @@ export class Crew {
     this.p = (await s.get('posts')) || [];
     this.ev = (await s.get('events')) || [];
     this.live = (await s.get('live')) || {};
+    this.t = (await s.get('trash')) || [];
+    this.f = (await s.get('former')) || {};
+    this.cp = {};
   }
   async save() {
     const s = this.state.storage;
-    await s.put('crew', this.c); await s.put('members', this.m); await s.put('posts', this.p); await s.put('events', this.ev); await s.put('live', this.live);
+    // posts are never dropped: overflow goes to archive pages
+    if (this.p.length > 150) { const old = this.p.splice(150); this.c.pArch = this.c.pArch || 0; let pg = (await s.get('pa:' + this.c.pArch)) || []; for (const x of old) { pg.push(x); if (pg.length >= PAGE) { await s.put('pa:' + this.c.pArch, pg); this.c.pArch++; pg = []; } } await s.put('pa:' + this.c.pArch, pg); }
+    const now = Date.now(); this.t = this.t.filter(x => now - x.ts < TRASH_KEEP).slice(0, 3000);
+    await s.put('crew', this.c); await s.put('members', this.m); await s.put('posts', this.p); await s.put('events', this.ev); await s.put('live', this.live); await s.put('trash', this.t); await s.put('former', this.f);
+    for (const [n, arr] of Object.entries(this.cp)) if (arr && arr._dirty) { delete arr._dirty; await s.put('cp:' + n, arr); }
+  }
+  // one full backup of the crew per day, kept 30 days; taken before the first change of the day
+  async snapshot() {
+    if (!this.c) return; const day = isoD(Date.now()); if (this.c.snapDay === day) return;
+    const s = this.state.storage, data = JSON.stringify({ v: 1, ts: Date.now(), c: this.c, m: this.m, p: this.p, t: this.t, f: this.f, chat: await this.chatTail(300) });
+    const parts = Math.ceil(data.length / 400000) || 1;
+    for (let i = 0; i < parts; i++) await s.put('snap:' + day + ':' + i, data.slice(i * 400000, (i + 1) * 400000));
+    const idx = ((await s.get('snapIdx')) || []).filter(x => x.day !== day); idx.push({ day, parts, ts: Date.now() });
+    while (idx.length > CREW_SNAPS) { const o = idx.shift(); for (let i = 0; i < o.parts; i++) await s.delete('snap:' + o.day + ':' + i); }
+    await s.put('snapIdx', idx); this.c.snapDay = day;
+  }
+  async readSnap(day) {
+    const idx = (await this.state.storage.get('snapIdx')) || [], e = idx.find(x => x.day === day); if (!e) return null;
+    let t = ''; for (let i = 0; i < e.parts; i++) t += (await this.state.storage.get('snap:' + day + ':' + i)) || '';
+    try { return JSON.parse(t); } catch (x) { return null; }
+  }
+  /* chat: append-only pages of 100 messages, nothing is ever dropped */
+  async page(n) { if (n < 0) return []; if (!this.cp[n]) this.cp[n] = (await this.state.storage.get('cp:' + n)) || []; return this.cp[n]; }
+  async chatTail(k) { const N = this.c.chatN || 0; let out = []; for (let n = N; n >= 0 && out.length < k; n--) out = (await this.page(n)).concat(out); return out.slice(-k); }
+  async findMsg(mid) { const n = parseInt(String(mid).split('-')[0], 10); if (!(n >= 0)) return null; const pg = await this.page(n); const m = pg.find(x => x.id === mid); return m ? { m, pg } : null; }
+  pubMsg(x) { return x.del ? { id: x.id, by: x.by, ts: x.ts, del: 1 } : x; }
+  trophyCheck() {
+    const c = this.c, ms = Object.values(this.m).filter(x => x.profile), T = c.trophies = c.trophies || {}, now = Date.now(), got = [];
+    const give = (k, tier, name) => { const cur = T[k] ? T[k].tier : 0; if (tier > cur) { T[k] = { tier, ts: now }; got.push(name); } };
+    const vol = ms.reduce((a, x) => a + toLb(+x.profile.lifeVol || 0, x.profile.unit), 0);
+    give('mpc', vol >= 1e7 ? 3 : vol >= 5e6 ? 2 : vol >= 1e6 ? 1 : 0, 'Million Pound Club');
+    const wo = ms.reduce((a, x) => a + (+x.profile.workouts || 0), 0);
+    give('century', wo >= 1000 ? 3 : wo >= 500 ? 2 : wo >= 100 ? 1 : 0, 'Century Club');
+    if (ms.length >= 2) {
+      for (const k of ['week', 'last']) {
+        if (ms.every(x => x.profile[k] && x.profile[k].days >= 1)) give('unbroken', 1, 'Unbroken');
+        if (ms.every(x => x.profile[k] && x.profile[k].days >= 3)) give('ironweek', 1, 'Iron Week');
+        if (ms.reduce((a, x) => a + (x.profile[k] ? +x.profile[k].prs || 0 : 0), 0) >= 10) give('prstorm', 1, 'PR Storm');
+      }
+    }
+    if (ms.length >= 3) { const sets = ms.map(x => new Set(x.profile.days || [])); const any = [...sets[0]].some(d => sets.every(z => z.has(d))); if (any) give('fullhouse', 1, 'Full House'); }
+    for (const x of ms) { const d = (x.profile.days || []).slice().sort(); if (d.length >= 2) { const a = toDate(d[d.length - 2]), b = toDate(d[d.length - 1]); if (b - a >= 14 * DAY && now - b < 8 * DAY) give('comeback', 1, 'Comeback Crew'); } }
+    const r0 = c.rank || 0, r1 = crewRankOf(c);
+    if (r1 > r0) { c.rank = r1; this.event('crewrank', '', '*', { text: ['Iron', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Titan', 'Olympian'][r1] }); }
+    else if (c.rank === undefined) c.rank = r1;
+    for (const name of got) { this.event('trophy', '', '*', { text: name }); this.p.unshift({ id: rid(), by: '', ts: now, type: 'trophy', data: { name }, reacts: {}, comments: [] }); }
   }
   event(type, from, to, extra) { this.ev.unshift({ id: rid(), ts: Date.now(), type, from, to: to || '*', ...extra }); this.ev = this.ev.slice(0, 200); }
   liveNow() { const o = {}, now = Date.now(); for (const [id, l] of Object.entries(this.live)) if (l.on && now - l.ts < 15 * 60 * 1000 && now - l.start < 4 * 3600 * 1000) o[id] = { day: l.day, start: l.start }; return o; }
@@ -327,12 +383,14 @@ export class Crew {
     const bud = {}; (this.c.buddies || []).forEach(x => { if (x.a === me || x.b === me) { const o = x.a === me ? x.b : x.a; bud[o] = (bud[o] || 0) + 1; } });
     const mine = (this.c.buddies || []).filter(x => x.a === me || x.b === me).map(x => x.date);
     return {
-      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), banner: this.c.banner || 'steel' },
+      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
+      former: Object.fromEntries(Object.entries(this.f).map(([k, v]) => [k, v.name])), trashN: this.t.filter(x => x.by === me || this.c.owner === me).length,
       members, posts: this.p.slice(0, 60), me, live: this.liveNow(), buddies: bud, buddyDates: mine,
       events: this.ev.filter(e => e.to === '*' || e.to === me).slice(0, 60),
       votes: this.voteView(me),
     };
   }
+  shameView(me) { const wk = monday(isoD(Date.now())), V = (this.c.shameV || {})[wk] || {}, tally = {}; Object.values(V).forEach(t => tally[t] = (tally[t] || 0) + 1); return { wk, tally, mine: V[me] || null }; }
   voteView(me) {
     const V = this.c.votes || {}, out = {};
     for (const [mo, cats] of Object.entries(V)) { out[mo] = {}; for (const [cat, ballots] of Object.entries(cats)) { const tally = {}; Object.values(ballots).forEach(t => tally[t] = (tally[t] || 0) + 1); out[mo][cat] = { tally, mine: ballots[me] || null }; } }
@@ -362,11 +420,12 @@ export class Crew {
     }
     let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad json' }, 400); }
     if (JSON.stringify(b).length > 60000) return json({ error: 'too big' }, 413);
+    if (this.c && path !== '/state' && path !== '/latest' && path !== '/chat/get') { try { await this.snapshot(); } catch (e) {} }
     if (path === '/create') {
       if (this.c) return json({ error: 'taken' }, 409);
       const id = clip(b.id, 40), key = clip(b.key, 80);
       if (!id || key.length < 16) return json({ error: 'bad member' }, 400);
-      this.c = { name: clip(b.name, 30) || 'My crew', code: b.code, owner: id, created: Date.now(), challenge: null, xp: 0, banner: 'steel', votes: {}, buddies: [] };
+      this.c = { name: clip(b.name, 30) || 'My crew', code: b.code, owner: id, created: Date.now(), challenge: null, xp: 0, banner: 'forge', votes: {}, buddies: [], trophies: {}, rank: 0 };
       this.m = { [id]: { name: clip(b.member, 24) || 'Lifter', key, joined: Date.now(), last: Date.now(), profile: null, push: null } };
       this.p = []; this.ev = []; this.live = {};
       await this.save();
@@ -376,14 +435,22 @@ export class Crew {
     const id = clip(b.id, 40), me = this.m[id];
     if (path === '/join') {
       if (me) { if (me.key !== b.key) return json({ error: 'auth' }, 403); }
+      else if (this.f[id] && this.f[id].key === clip(b.key, 80)) {
+        // coming back: same member, all their history is still here
+        const o = this.f[id]; delete this.f[id];
+        this.m[id] = { name: clip(b.member, 24) || o.name, key: o.key, joined: o.joined || Date.now(), last: Date.now(), profile: o.profile || null, push: null };
+        this.event('join', id); this.broadcast({ t: 'refresh' });
+      }
       else {
         if (Object.keys(this.m).length >= 30) return json({ error: 'full' }, 403);
         if (!id || clip(b.key, 80).length < 16) return json({ error: 'bad member' }, 400);
         this.m[id] = { name: clip(b.member, 24) || 'Lifter', key: clip(b.key, 80), joined: Date.now(), last: Date.now(), profile: null, push: null };
+        if (this.c.archived) { this.c.archived = null; if (!this.m[this.c.owner]) this.c.owner = id; try { await this.state.storage.deleteAlarm(); } catch (e) {} }
         this.p.unshift({ id: rid(), by: id, ts: Date.now(), type: 'join', reacts: {}, comments: [] });
         this.event('join', id);
         this.broadcast({ t: 'refresh' });
       }
+      if (this.c.archived && Object.keys(this.m).length) { this.c.archived = null; if (!this.m[this.c.owner]) this.c.owner = id; try { await this.state.storage.deleteAlarm(); } catch (e) {} }
       await this.save();
       return json(this.view(id));
     }
@@ -415,12 +482,13 @@ export class Crew {
           } catch (e) {}
         }
         me.profile = p;
+        this.trophyCheck();
         break;
       }
       case '/post': {
         const t = b.post && b.post.type === 'rank' ? 'rank' : 'workout';
         const p = { id: rid(), by: id, ts: Date.now(), type: t, cap: clip(b.post && b.post.cap, 280), data: b.post && b.post.data || null, reacts: {}, comments: [] };
-        this.p.unshift(p); this.p = this.p.slice(0, 150);
+        this.p.unshift(p);
         this.c.xp = (this.c.xp || 0) + 5;
         if (t === 'rank') this.event('rank', id, '*', { text: clip(p.data && p.data.rname, 30) });
         await this.notify(id, t === 'rank' ? `${me.name} ranked up` : `${me.name} posted a workout`);
@@ -428,21 +496,102 @@ export class Crew {
       }
       case '/react': {
         const p = post(b.post); const e = clip(b.emoji, 8);
-        if (p && ['fire', 'muscle', 'trophy'].includes(e)) { const a = p.reacts[e] = p.reacts[e] || []; const i = a.indexOf(id); if (i < 0) { a.push(id); if (p.by !== id) this.event('react', id, p.by, { post: p.id, emoji: e }); } else a.splice(i, 1); }
+        if (p && REACTS.includes(e)) { const a = p.reacts[e] = p.reacts[e] || []; const i = a.indexOf(id); if (i < 0) { a.push(id); if (p.by !== id) this.event('react', id, p.by, { post: p.id, emoji: e }); } else a.splice(i, 1); }
         break;
       }
       case '/comment': {
         const p = post(b.post); const t = clip(b.text, 200).trim();
-        if (p && t) { p.comments.push({ by: id, ts: Date.now(), text: t }); p.comments = p.comments.slice(-50); if (p.by !== id) this.event('comment', id, p.by, { post: p.id, text: t.slice(0, 60) }); }
+        if (p && t) { p.comments.push({ by: id, ts: Date.now(), text: t }); p.comments = p.comments.slice(-300); if (p.by !== id) this.event('comment', id, p.by, { post: p.id, text: t.slice(0, 60) }); }
         break;
       }
-      case '/delete': { const p = post(b.post); if (p && (p.by === id || this.c.owner === id)) this.p = this.p.filter(x => x !== p); break; }
-      case '/kick': { if (this.c.owner === id && b.target !== id) { const t = clip(b.target, 40); delete this.m[t]; this.broadcast({ t: 'kicked' }, t); } break; }
+      case '/delete': { const p = post(b.post); if (p && (p.by === id || this.c.owner === id)) { this.p = this.p.filter(x => x !== p); this.t.unshift({ id: rid(), kind: 'post', by: p.by, delBy: id, ts: Date.now(), item: p }); } break; }
+      case '/kick': { if (this.c.owner === id && b.target !== id) { const t = clip(b.target, 40); if (this.m[t]) { this.f[t] = { ...this.m[t], left: Date.now(), kicked: true }; delete this.m[t]; } this.broadcast({ t: 'kicked' }, t); } break; }
       case '/leave': {
-        delete this.m[id];
+        this.f[id] = { ...me, left: Date.now() }; delete this.m[id];
         if (this.c.owner === id) { const next = Object.keys(this.m)[0]; if (next) this.c.owner = next; }
-        if (!Object.keys(this.m).length) { await this.state.storage.deleteAll(); this.c = null; return json({ ok: true }); }
+        if (!Object.keys(this.m).length) {
+          // last one out: keep everything for 90 days instead of wiping it
+          this.c.archived = Date.now(); await this.save(); try { await this.state.storage.setAlarm(Date.now() + ARCHIVE_KEEP); } catch (e) {}
+          return json({ ok: true, archived: true });
+        }
         await this.save(); this.broadcast({ t: 'refresh' }); return json({ ok: true });
+      }
+      case '/trash': { changed = false; await this.save(); return json({ items: this.t.filter(x => x.by === id || this.c.owner === id).map(x => ({ id: x.id, kind: x.kind, by: x.by, ts: x.ts, left: Math.max(0, Math.ceil((x.ts + TRASH_KEEP - Date.now()) / DAY)), text: x.kind === 'post' ? (x.item.cap || (x.item.data && x.item.data.day) || x.item.type) : x.text })) }); }
+      case '/restore': {
+        const i = this.t.findIndex(x => x.id === b.item); const x = this.t[i];
+        if (x && (x.by === id || this.c.owner === id)) {
+          if (x.kind === 'post') { if (!this.p.some(q => q.id === x.item.id)) { this.p.push(x.item); this.p.sort((a, c2) => c2.ts - a.ts); } }
+          if (x.kind === 'msg') { const f = await this.findMsg(x.mid); if (f) { f.m.text = x.text; f.m.card = x.card || null; delete f.m.del; f.pg._dirty = 1; this.broadcast({ t: 'chatupd', msg: f.m }); } }
+          this.t.splice(i, 1);
+        }
+        break;
+      }
+      case '/snaps': { changed = false; if (this.c.owner !== id) return json({ error: 'owner only' }, 409); return json({ days: ((await this.state.storage.get('snapIdx')) || []).map(x => ({ day: x.day, ts: x.ts })).reverse() }); }
+      case '/snaprestore': {
+        // owner only, and it only ADDS back what is missing: nothing current is ever removed
+        if (this.c.owner !== id) return json({ error: 'owner only' }, 409);
+        const o = await this.readSnap(clip(b.day, 10)); if (!o) return json({ error: 'no backup for that day' }, 410);
+        let added = 0;
+        for (const [k, v] of Object.entries(o.m || {})) if (!this.m[k] && !(this.f[k] && this.f[k].kicked)) { this.m[k] = v; delete this.f[k]; added++; }
+        const have = new Set(this.p.map(x => x.id)); for (const x of o.p || []) if (!have.has(x.id)) { this.p.push(x); added++; }
+        this.p.sort((a, c2) => c2.ts - a.ts);
+        for (const x of o.chat || []) { const f = await this.findMsg(x.id); if (f && f.m.del && !x.del) { Object.assign(f.m, x); delete f.m.del; f.pg._dirty = 1; added++; } }
+        if (o.c) { this.c.xp = Math.max(this.c.xp || 0, o.c.xp || 0); this.c.trophies = { ...(o.c.trophies || {}), ...(this.c.trophies || {}) }; }
+        this.event('restore', id, '*', { text: clip(b.day, 10) });
+        await this.save(); this.broadcast({ t: 'refresh' }); return json({ ok: true, added, ...this.view(id) });
+      }
+      case '/rename': { const n = clip(b.name, 30).trim(); if (this.c.owner === id && n) { const old = this.c.name; this.c.name = n; this.event('rename', id, '*', { text: n, old }); } break; }
+      case '/crest': {
+        if (this.c.owner === id) { const c = b.crest || {}; this.c.crest = { shape: CREST.shape.includes(c.shape) ? c.shape : 'shield', icon: CREST.icon.includes(c.icon) ? c.icon : 'barbell', c1: /^#[0-9a-f]{6}$/i.test(c.c1) ? c.c1 : '#ef2b36', c2: /^#[0-9a-f]{6}$/i.test(c.c2) ? c.c2 : '#14161c', txt: clip(c.txt, 3).toUpperCase().replace(/[^A-Z0-9]/g, '') }; }
+        break;
+      }
+      case '/shame': {
+        const t = clip(b.target, 40), wk = monday(isoD(Date.now()));
+        if (this.m[t] && t !== id) {
+          const V = this.c.shameV = this.c.shameV || {}; V[wk] = V[wk] || {}; V[wk][id] = t;
+          const ks = Object.keys(V).sort(); while (ks.length > 4) delete V[ks.shift()];
+          const n = Object.values(V[wk]).filter(x => x === t).length, need = Math.max(1, Math.ceil((Object.keys(this.m).length - 1) / 2));
+          if (n >= need && !(this.c.shame && this.c.shame.wk === wk)) { this.c.shame = { target: t, wk, until: Date.now() + 7 * DAY }; this.event('shame', '', '*', { text: this.m[t].name, target: t }); }
+        }
+        break;
+      }
+      case '/chat/get': {
+        changed = false; const N = this.c.chatN || 0; let before = b.before === undefined ? N : Math.max(0, Math.min(N, +b.before || 0));
+        let msgs = (await this.page(before)).slice(); if (b.before === undefined && before > 0 && msgs.length < 40) { msgs = (await this.page(before - 1)).concat(msgs); before--; }
+        await this.save(); return json({ msgs: msgs.map(x => this.pubMsg(x)), page: before, more: before > 0 });
+      }
+      case '/chat/send': {
+        const mu = (this.c.muted || {})[id]; if (mu && mu > Date.now()) return json({ error: 'muted', until: mu }, 423);
+        const text = clip(b.text, 500).trim(), card = b.card && typeof b.card === 'object' ? JSON.parse(clip(JSON.stringify(b.card), 6000)) : null;
+        if (!text && !card) return json({ error: 'empty' }, 400);
+        this.rate = this.rate || {}; const r = this.rate[id] = (this.rate[id] || []).filter(t => Date.now() - t < 60000); if (r.length >= 20) return json({ error: 'slow down' }, 429); r.push(Date.now());
+        const N = this.c.chatN || 0, pg = await this.page(N);
+        const rp = b.reply ? await this.findMsg(clip(b.reply, 30)) : null;
+        const msg = { id: N + '-' + rid(), by: id, ts: Date.now(), text, card, reply: rp && !rp.m.del ? { id: rp.m.id, by: rp.m.by, text: clip(rp.m.text, 80) } : null, reacts: {} };
+        pg.push(msg); pg._dirty = 1; if (pg.length >= PAGE) this.c.chatN = N + 1;
+        this.c.chatLast = msg.ts; this.c.chatCount = (this.c.chatCount || 0) + 1; this.c.chatRecent = [...(this.c.chatRecent || []), { ts: msg.ts, by: id }].slice(-40);
+        const low = text.toLowerCase(), tagged = Object.entries(this.m).filter(([k, x]) => k !== id && x.name && low.includes('@' + x.name.toLowerCase())).map(([k]) => k);
+        for (const k of tagged) this.event('mention', id, k, { text: clip(text, 60) });
+        if (rp && rp.m.by !== id && !tagged.includes(rp.m.by)) this.event('reply', id, rp.m.by, { text: clip(text, 60) });
+        await this.save(); this.broadcast({ t: 'chat', msg });
+        const pushTo = tagged.filter(k => this.m[k] && this.m[k].push);
+        if (pushTo.length) { this.c.lastNote = { title: `${me.name} mentioned you`, ts: Date.now(), from: id, body: clip(text, 80) }; await Promise.all(pushTo.map(k => sendPush(this.m[k].push, this.env).catch(() => {}))); await this.save(); }
+        return json({ ok: true, msg });
+      }
+      case '/chat/react': {
+        const f = await this.findMsg(clip(b.mid, 30)), e = clip(b.emoji, 8);
+        if (f && !f.m.del && REACTS.includes(e)) { const a = f.m.reacts[e] = f.m.reacts[e] || []; const i = a.indexOf(id); if (i < 0) a.push(id); else a.splice(i, 1); f.pg._dirty = 1; await this.save(); this.broadcast({ t: 'chatupd', msg: f.m }); }
+        return json({ ok: true });
+      }
+      case '/chat/delete': {
+        const f = await this.findMsg(clip(b.mid, 30));
+        if (f && !f.m.del && (f.m.by === id || this.c.owner === id)) { this.t.unshift({ id: rid(), kind: 'msg', mid: f.m.id, by: f.m.by, delBy: id, ts: Date.now(), text: f.m.text, card: f.m.card || null }); f.m.del = 1; f.m.text = ''; f.m.card = null; f.pg._dirty = 1; await this.save(); this.broadcast({ t: 'chatupd', msg: this.pubMsg(f.m) }); }
+        return json({ ok: true });
+      }
+      case '/chat/mute': {
+        if (this.c.owner !== id) return json({ error: 'owner only' }, 409);
+        const t = clip(b.target, 40); this.c.muted = this.c.muted || {}; if (b.off) delete this.c.muted[t]; else if (this.m[t] && t !== id) this.c.muted[t] = Date.now() + Math.max(1, Math.min(168, +b.hours || 24)) * 3600000;
+        break;
       }
       case '/challenge': {
         const ty = clip(b.type, 10);
@@ -450,7 +599,11 @@ export class Crew {
         if (this.c.challenge) this.event('challenge', id, '*', { text: this.c.challenge.title });
         break;
       }
-      case '/banner': { const k = clip(b.banner, 10); if (this.c.owner === id && BANNERS[k] && crewLevel(this.c.xp) >= BANNERS[k]) this.c.banner = k; break; }
+      case '/banner': {
+        const k = clip(b.banner, 12), sc = SCENES[k], lv = crewLevel(this.c.xp);
+        const ok = sc ? ((sc.lv && lv >= sc.lv) || (sc.rank && (this.c.rank || 0) >= sc.rank) || (sc.trophy && (this.c.trophies || {})[sc.trophy])) : (BANNERS[k] && lv >= BANNERS[k]);
+        if (this.c.owner === id && ok) this.c.banner = k; break;
+      }
       case '/vote': {
         const mo = clip(b.month, 7), cat = clip(b.cat, 12), t = clip(b.target, 40);
         if (/^\d{4}-\d{2}$/.test(mo) && ['grinder', 'hype', 'comeback', 'improved', 'post'].includes(cat) && this.m[t] && t !== id) {
@@ -462,7 +615,8 @@ export class Crew {
       case '/live': { this.setLive(id, b); changed = false; await this.save(); this.broadcast({ t: 'live', live: this.liveNow() }); return json({ ok: true, live: this.liveNow() }); }
       case '/pings': me.push = b.endpoint && okEndpoint(b.endpoint) ? b.endpoint : null; changed = false; break;
       case '/latest': {
-        const p = this.p.find(x => x.by !== id && x.type !== 'join');
+        const ln = this.c.lastNote; if (ln && ln.body && Date.now() - ln.ts < 120000) return json({ title: ln.title, body: ln.body });
+        const p = this.p.find(x => x.by !== id && x.type !== 'join' && x.by);
         const who = p && this.m[p.by] ? this.m[p.by].name : 'Your crew';
         return json(p ? { title: p.type === 'rank' ? `${who} ranked up 🏅` : `${who} just finished a workout 💪`, body: p.type === 'rank' ? 'Tap to see their new rank' : (p.cap || (p.data && p.data.day ? p.data.day + ' is done' : 'Tap to see it')) } : { title: 'Overload', body: 'New activity in your crew' });
       }
@@ -493,6 +647,10 @@ export class Crew {
     if (m.t === 'live') { this.setLive(id, m); await this.save(); this.broadcast({ t: 'live', live: this.liveNow() }); }
     else if (m.t === 'hype' && this.m[m.to]) { this.broadcast({ t: 'hype', from: this.m[id].name, fromId: id }, clip(m.to, 40)); this.event('hype', id, clip(m.to, 40)); await this.save(); }
     else if (m.t === 'ping') { try { ws.send('{"t":"pong"}'); } catch (e) {} }
+  }
+  async alarm() {
+    await this.load(); if (!this.c || !this.c.archived) return;
+    if (Date.now() - this.c.archived >= ARCHIVE_KEEP - 60000 && !Object.keys(this.m).length) { await this.state.storage.deleteAll(); this.c = null; }
   }
   async webSocketClose(ws) { try { ws.close(); } catch (e) {} }
   async webSocketError() {}
