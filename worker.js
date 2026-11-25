@@ -1,4 +1,4 @@
-// Overload server 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
+// Overload server 0.15 (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
 // Bindings: TIMER (RestTimer), CREW (Crew), VAULT (Vault). Secret: VAPID_PRIVATE.
 
 const ORIGIN = 'https://jscarp9.github.io';
@@ -136,6 +136,17 @@ export default {
       return withCors(await env.VAULT.get(env.VAULT.idFromName(acct)).fetch('https://do' + p, { method: 'POST', body: JSON.stringify({ ...b, acct }) }));
     }
 
+    if (url.pathname.startsWith('/stats/')) {
+      if (!env.STATS) return json({ error: 'stats off' }, 503);
+      const p = url.pathname.slice(6);
+      if (p === '/dash') {
+        const acct = clip(b.acct, 40); if (!/^[0-9a-f]{24}$/.test(acct)) return json({ error: 'auth' }, 401);
+        const r = await env.VAULT.get(env.VAULT.idFromName(acct)).fetch('https://do/isfounder', { method: 'POST', body: JSON.stringify({ token: b.token }) });
+        const j = await r.json().catch(() => ({})); if (!j.founder) return json({ error: 'owner only' }, 401);
+      }
+      if (p !== '/ping' && p !== '/dash') return json({ error: 'not found' }, 404);
+      return withCors(await env.STATS.get(env.STATS.idFromName('global')).fetch('https://do' + p, { method: 'POST', body: JSON.stringify(b) }));
+    }
     if (url.pathname.startsWith('/crew/')) {
       let code = String(b && b.code || '').toUpperCase().trim();
       if (url.pathname === '/crew/create') {
@@ -218,9 +229,15 @@ export class Vault {
       return json({ token: await this.issue(m), seq: m.seq });
     }
     const meta = await this.authed(b);
+    if (path === '/isfounder') return json({ founder: !!(meta && meta.founder) });
+    if (path === '/founder') {
+      if (!meta) return json({ error: 'auth' }, 403);
+      if ((await sha('founder:' + String(b.code || '').trim().toUpperCase())) !== FOUNDER_HASH) return json({ error: 'wrong code' }, 400);
+      meta.founder = true; await s.put('meta', meta); return json({ ok: true, founder: true });
+    }
     if (path === '/stats') {
       if (!meta) return json({ error: 'auth' }, 403);
-      return json(computeStats(await this.sessions(), clip(b.today, 10) || isoD(Date.now()), ((await s.get('i:settings')) || {}).unit));
+      return json({ ...computeStats(await this.sessions(), clip(b.today, 10) || isoD(Date.now()), ((await s.get('i:settings')) || {}).unit), founder: !!meta.founder });
     }
     if (!meta) return json({ error: 'auth' }, 403);
     switch (path) {
@@ -307,8 +324,15 @@ const BANNERS = { steel: 1, ember: 2, ocean: 3, toxic: 5, royal: 7, gold: 10 };
 // 0.14 animated scene banners: unlocked by crew level (lv), crew rank (rank) or a crew trophy (trophy)
 const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 } };
 const CREST = { shape: ['shield', 'plate', 'circle', 'hex'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'] };
-const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart'];
+const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart', 'crest'];
 const CREW_RANK_PTS = [0, 400, 1200, 2500, 4500, 7500, 11500, 17000];
+// 0.15
+const FOUNDER_HASH = '28f8f69ed443c0fb11e41c2961f3d72f1958675f2bdcc62ed3e541049bad9466'; // sha256('founder:' + secret code); only the hash is public
+const OG_CUTOFF = Date.UTC(2027, 11, 31); // OG numbers for everyone who joins before the App Store launch
+const BOSSES = [['titan', 'The Iron Titan'], ['golem', 'Plate Golem'], ['hydra', 'Rack Hydra'], ['kraken', 'Deadlift Kraken'], ['dragon', 'Dumbbell Dragon'], ['minotaur', 'Bench Minotaur'], ['yeti', 'Squat Yeti'], ['phoenix', 'Cardio Phoenix']];
+const BOSS_HP_PER = 45000; // lb per member, at least 2 members
+const ROLES = ['Captain', 'Co-captain', 'Hype Man', 'Spotter', 'Coach', 'Rookie', 'Legend', 'Enforcer', 'Comedian'];
+const wkIndex = d => Math.floor((toDate(d) - Date.UTC(2026, 0, 5)) / (7 * DAY));
 const DAY = 864e5, TRASH_KEEP = 30 * DAY, ARCHIVE_KEEP = 90 * DAY, CREW_SNAPS = 30, PAGE = 100;
 const crewRankOf = c => { const pts = (c.xp || 0) + Object.keys(c.trophies || {}).length * 400; let r = 0; CREW_RANK_PTS.forEach((t, i) => { if (pts >= t) r = i; }); return r; };
 const toLb = (v, u) => u === 'kg' ? v * 2.20462 : v;
@@ -377,19 +401,35 @@ export class Crew {
     for (const name of got) { this.event('trophy', '', '*', { text: name }); this.p.unshift({ id: rid(), by: '', ts: now, type: 'trophy', data: { name }, reacts: {}, comments: [] }); }
   }
   event(type, from, to, extra) { this.ev.unshift({ id: rid(), ts: Date.now(), type, from, to: to || '*', ...extra }); this.ev = this.ev.slice(0, 200); }
-  liveNow() { const o = {}, now = Date.now(); for (const [id, l] of Object.entries(this.live)) if (l.on && now - l.ts < 15 * 60 * 1000 && now - l.start < 4 * 3600 * 1000) o[id] = { day: l.day, start: l.start }; return o; }
+  liveNow() { const o = {}, now = Date.now(); for (const [id, l] of Object.entries(this.live)) if (l.on && now - l.ts < 15 * 60 * 1000 && now - l.start < 4 * 3600 * 1000) o[id] = { day: l.day, start: l.start, g: l.g || '', sets: l.sets || 0, vol: l.vol || 0, ex: l.ex || '', rest: l.rest || 0, prs: l.prs || 0, unit: l.unit || 'lb' }; return o; }
   view(me) {
-    const members = Object.entries(this.m).map(([id, x]) => ({ id, name: x.name, joined: x.joined, last: x.last, profile: x.profile || null, pings: !!x.push, ok: !!x.ok }));
+    const members = Object.entries(this.m).map(([id, x]) => ({ id, name: x.name, joined: x.joined, last: x.last, profile: x.profile || null, pings: !!x.push, ok: !!x.ok, respect: x.respect || 0, nick: this.nickOf(id), role: (this.c.roles || {})[id] || (id === this.c.owner ? 'Captain' : ''), jersey: (this.c.jerseys || {})[id] || (id === this.c.founder ? 1 : null) }));
     const bud = {}; (this.c.buddies || []).forEach(x => { if (x.a === me || x.b === me) { const o = x.a === me ? x.b : x.a; bud[o] = (bud[o] || 0) + 1; } });
     const mine = (this.c.buddies || []).filter(x => x.a === me || x.b === me).map(x => x.date);
     return {
       crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
+      raid: this.raidView(), groups: this.groupView(), style: { motto: this.c.motto || '', c1: this.c.sc1 || '', c2: this.c.sc2 || '' }, pins: (this.c.pins || []).slice(0, 10), hof: (this.c.hof || []).slice(0, 40), nickVotes: Object.fromEntries(Object.entries(this.c.nickV || {}).map(([t, v]) => [t, v[me] || null])), respectGiven: Object.entries(this.c.respLog || {}).filter(([k]) => k.startsWith(isoD(Date.now()) + ':' + me + ':')).map(([k]) => k.split(':')[2]),
       former: Object.fromEntries(Object.entries(this.f).map(([k, v]) => [k, v.name])), trashN: this.t.filter(x => x.by === me || this.c.owner === me).length,
       members, posts: this.p.slice(0, 60), me, live: this.liveNow(), buddies: bud, buddyDates: mine,
       events: this.ev.filter(e => e.to === '*' || e.to === me).slice(0, 60),
       votes: this.voteView(me),
     };
   }
+  nickOf(id) { const V = (this.c.nickV || {})[id]; if (!V) return ''; const t = {}; Object.values(V).forEach(n => t[n] = (t[n] || 0) + 1); const best = Object.entries(t).sort((a, b2) => b2[1] - a[1])[0]; const need = Math.max(1, Math.ceil((Object.keys(this.m).length - 1) / 2)); return best && best[1] >= need ? best[0] : ''; }
+  raidNow() {
+    const d = isoD(Date.now()), wk = monday(d), i = ((wkIndex(wk) % BOSSES.length) + BOSSES.length) % BOSSES.length, n = Math.max(2, Object.keys(this.m).length);
+    const R = this.c.raids = this.c.raids || {}; if (!R[wk]) { R[wk] = { boss: BOSSES[i][0], name: BOSSES[i][1], hp: BOSS_HP_PER * n, dmg: {}, beaten: 0 }; const ks = Object.keys(R).sort(); while (ks.length > 26) delete R[ks.shift()]; }
+    if (!R[wk].beaten) R[wk].hp = BOSS_HP_PER * n;
+    return [wk, R[wk]];
+  }
+  raidHit() {
+    const [wk, r] = this.raidNow(); if (r.beaten) return;
+    for (const [id, x] of Object.entries(this.m)) { const w = x.profile && x.profile.week; if (w) { const v = Math.round(toLb(+w.vol || 0, x.profile.unit)); if (v > (r.dmg[id] || 0)) r.dmg[id] = v; } }
+    const tot = Object.values(r.dmg).reduce((a, v) => a + v, 0);
+    if (tot >= r.hp) { r.beaten = Date.now(); this.c.raidWins = (this.c.raidWins || 0) + 1; this.c.xp = (this.c.xp || 0) + 300; this.event('raid', '', '*', { text: r.name }); this.p.unshift({ id: rid(), by: '', ts: Date.now(), type: 'raid', data: { name: r.name, boss: r.boss, hp: r.hp, dmg: r.dmg }, reacts: {}, comments: [] }); }
+  }
+  raidView() { const [wk, r] = this.raidNow(); const tot = Object.values(r.dmg).reduce((a, v) => a + v, 0); return { wk, boss: r.boss, name: r.name, hp: r.hp, dmg: Math.min(tot, r.hp), hits: r.dmg, beaten: r.beaten, wins: this.c.raidWins || 0, won: Object.entries(this.c.raids || {}).filter(([k, x]) => x.beaten).map(([k, x]) => ({ wk: k, name: x.name, by: Object.keys(x.dmg).filter(m => x.dmg[m] > 0) })) }; }
+  groupView() { const G = this.c.groups || {}, now = Date.now(), out = {}; for (const [gid, g] of Object.entries(G)) if (!g.ended && now - g.ts < 4 * 3600 * 1000) out[gid] = { host: g.host, ts: g.ts, members: g.members, sync: !!g.sync }; return out; }
   shameView(me) { const wk = monday(isoD(Date.now())), V = (this.c.shameV || {})[wk] || {}, tally = {}; Object.values(V).forEach(t => tally[t] = (tally[t] || 0) + 1); return { wk, tally, mine: V[me] || null }; }
   voteView(me) {
     const V = this.c.votes || {}, out = {};
@@ -425,7 +465,7 @@ export class Crew {
       if (this.c) return json({ error: 'taken' }, 409);
       const id = clip(b.id, 40), key = clip(b.key, 80);
       if (!id || key.length < 16) return json({ error: 'bad member' }, 400);
-      this.c = { name: clip(b.name, 30) || 'My crew', code: b.code, owner: id, created: Date.now(), challenge: null, xp: 0, banner: 'forge', votes: {}, buddies: [], trophies: {}, rank: 0 };
+      this.c = { name: clip(b.name, 30) || 'My crew', code: b.code, owner: id, created: Date.now(), challenge: null, xp: 0, banner: 'forge', votes: {}, buddies: [], trophies: {}, rank: 0, founder: clip(b.id, 40) };
       this.m = { [id]: { name: clip(b.member, 24) || 'Lifter', key, joined: Date.now(), last: Date.now(), profile: null, push: null } };
       this.p = []; this.ev = []; this.live = {};
       await this.save();
@@ -478,11 +518,20 @@ export class Crew {
               p.streak = Math.min(+p.streak || 0, st.streak + 2); p.bcount = Math.min(+p.bcount || 0, 400);
               p.power = Math.round(p.rank * 120 + (p.rank < 7 ? (3 - (+p.div || 3)) * 40 : 0) + (+p.pres || 0) * 100 + st.active * 6 + p.bcount * 3 + st.lifePR * 2 + p.streak * 4);
               me.ok = true;
+              if (st.founder) p.founder = 1; else delete p.founder;
             }
           } catch (e) {}
         }
+        if (p && !me.ok) delete p.founder;
+        if (p) {
+          if (!me.og && this.env.STATS) { try { const r = await this.env.STATS.get(this.env.STATS.idFromName('global')).fetch('https://do/og', { method: 'POST', body: JSON.stringify({ mid: id, founder: !!p.founder }) }); const j = await r.json(); if (j.og) me.og = j.og; } catch (e) {} }
+          if (p.founder && me.og !== 1 && this.env.STATS) { try { const r = await this.env.STATS.get(this.env.STATS.idFromName('global')).fetch('https://do/og', { method: 'POST', body: JSON.stringify({ mid: id, founder: true }) }); const j = await r.json(); if (j.og) me.og = j.og; } catch (e) {} }
+          if (me.og) p.og = me.og; else delete p.og;
+          ['motto', 'gym', 'phase', 'ltype', 'song'].forEach(k => { if (p[k] !== undefined) p[k] = clip(p[k], k === 'motto' ? 60 : 30); });
+        }
         me.profile = p;
         this.trophyCheck();
+        this.raidHit();
         break;
       }
       case '/post': {
@@ -539,6 +588,75 @@ export class Crew {
         if (o.c) { this.c.xp = Math.max(this.c.xp || 0, o.c.xp || 0); this.c.trophies = { ...(o.c.trophies || {}), ...(this.c.trophies || {}) }; }
         this.event('restore', id, '*', { text: clip(b.day, 10) });
         await this.save(); this.broadcast({ t: 'refresh' }); return json({ ok: true, added, ...this.view(id) });
+      }
+      case '/respect': {
+        const t = clip(b.target, 40), key = isoD(Date.now()) + ':' + id + ':' + t;
+        if (this.m[t] && t !== id) { const L = this.c.respLog = this.c.respLog || {}; if (!L[key]) { L[key] = 1; this.m[t].respect = (this.m[t].respect || 0) + 1; this.event('respect', id, t); const ks = Object.keys(L); if (ks.length > 600) ks.sort().slice(0, ks.length - 600).forEach(k => delete L[k]); } }
+        break;
+      }
+      case '/nick': {
+        const t = clip(b.target, 40), n = clip(b.nick, 20).trim();
+        if (this.m[t] && t !== id) { const V = this.c.nickV = this.c.nickV || {}; V[t] = V[t] || {}; if (n) V[t][id] = n; else delete V[t][id]; const before = this.nickOf(t); if (n && before === n) this.event('nick', '', t, { text: n }); }
+        break;
+      }
+      case '/role': {
+        const t = clip(b.target, 40), r = clip(b.role, 16).trim();
+        if (this.c.owner === id && this.m[t]) { this.c.roles = this.c.roles || {}; if (r) this.c.roles[t] = r; else delete this.c.roles[t]; }
+        break;
+      }
+      case '/jersey': {
+        const n = Math.round(+b.num); const J = this.c.jerseys = this.c.jerseys || {};
+        if (b.off) delete J[id];
+        else if (n >= 0 && n <= 99 && !Object.entries(J).some(([k, v]) => v === n && k !== id) && !(n === 1 && this.c.founder && this.c.founder !== id)) J[id] = n;
+        else return json({ error: 'taken' }, 409);
+        break;
+      }
+      case '/crewstyle': {
+        if (this.c.owner === id) { this.c.motto = clip(b.motto, 60); const hx = v => /^#[0-9a-f]{6}$/i.test(v || '') ? v : ''; this.c.sc1 = hx(b.c1); this.c.sc2 = hx(b.c2); }
+        break;
+      }
+      case '/chat/pin': {
+        const f = await this.findMsg(clip(b.mid, 30)), P = this.c.pins = this.c.pins || [], rl = (this.c.roles || {})[id] || '';
+        if (f && !f.m.del && (this.c.owner === id || rl === 'Co-captain')) { const i = P.findIndex(x => x.id === f.m.id); if (i >= 0) P.splice(i, 1); else { P.unshift({ id: f.m.id, by: f.m.by, text: clip(f.m.text, 200), card: f.m.card ? { day: f.m.card.day } : null, ts: f.m.ts, pinBy: id }); P.splice(10); } }
+        await this.save(); this.broadcast({ t: 'refresh' }); return json({ ok: true, pins: P });
+      }
+      case '/hof': {
+        const H = this.c.hof = this.c.hof || [], rl = (this.c.roles || {})[id] || '';
+        if (this.c.owner !== id && rl !== 'Co-captain') return json({ error: 'owner only' }, 409);
+        if (b.remove) { this.c.hof = H.filter(x => x.id !== b.remove); break; }
+        const kind = b.kind === 'member' ? 'member' : 'post';
+        if (kind === 'member' && this.m[b.ref]) H.unshift({ id: rid(), kind, ref: b.ref, name: this.m[b.ref].name, text: clip(b.text, 80), by: id, ts: Date.now() });
+        if (kind === 'post') { const q = post(b.ref); if (q) H.unshift({ id: rid(), kind, ref: q.id, who: q.by, text: clip(b.text || q.cap || (q.data && q.data.day) || 'Legendary session', 80), data: q.data ? { day: q.data.day, vol: q.data.vol, sets: q.data.sets, prs: q.data.prs, unit: q.data.unit, top: (q.data.top || []).slice(0, 3) } : null, by: id, ts: Date.now() }); }
+        this.c.hof = H.slice(0, 40); this.event('hof', id, '*', { text: clip(b.text || '', 40) });
+        break;
+      }
+      case '/group/start': {
+        const G = this.c.groups = this.c.groups || {}; for (const [k, g] of Object.entries(G)) if (g.members.includes(id) && !g.ended) g.members = g.members.filter(x => x !== id);
+        const gid = rid().slice(0, 8); G[gid] = { host: id, ts: Date.now(), members: [id], sync: !!b.sync, ended: 0 };
+        const ks = Object.keys(G); if (ks.length > 30) ks.sort((a, c2) => G[a].ts - G[c2].ts).slice(0, ks.length - 30).forEach(k => delete G[k]);
+        this.event('group', id, '*', { text: me.name, gid }); await this.save(); this.broadcast({ t: 'group' });
+        const pushTo = Object.entries(this.m).filter(([k, x]) => k !== id && x.push);
+        if (pushTo.length) { this.c.lastNote = { title: me.name + ' started a group lift', ts: Date.now(), from: id, body: 'Tap to lift together' }; await this.save(); await Promise.all(pushTo.map(([k, x]) => sendPush(x.push, this.env).catch(() => {}))); }
+        return json({ ok: true, gid, ...this.view(id) });
+      }
+      case '/group/join': {
+        const G = this.c.groups || {}, g = G[clip(b.gid, 12)];
+        if (!g || g.ended) return json({ error: 'group ended' }, 410);
+        for (const x of Object.values(G)) if (x !== g) x.members = x.members.filter(m => m !== id);
+        if (!g.members.includes(id)) g.members.push(id); this.event('groupjoin', id, g.host); await this.save(); this.broadcast({ t: 'group' }); return json({ ok: true, ...this.view(id) });
+      }
+      case '/group/leave': { const g = (this.c.groups || {})[clip(b.gid, 12)]; if (g) { g.members = g.members.filter(m => m !== id); if (!g.members.length) g.ended = Date.now(); else if (g.host === id) g.host = g.members[0]; } this.broadcast({ t: 'group' }); break; }
+      case '/group/end': {
+        const g = (this.c.groups || {})[clip(b.gid, 12)]; if (!g || g.ended) return json({ error: 'group ended' }, 410);
+        if (g.host !== id && !g.members.includes(id)) return json({ error: 'not in group' }, 409);
+        const L = this.liveNow(), mins = Math.max(1, Math.round((Date.now() - g.ts) / 60000)), rows = g.members.map(m => ({ id: m, sets: (L[m] || {}).sets || 0, vol: Math.round(toLb((L[m] || {}).vol || 0, (L[m] || {}).unit)), prs: (L[m] || {}).prs || 0 }));
+        const extra = b.rows && typeof b.rows === 'object' ? b.rows : {};
+        rows.forEach(r => { const x = extra[r.id]; if (x && r.id === id) { r.sets = Math.max(r.sets, +x.sets || 0); r.vol = Math.max(r.vol, Math.round(+x.vol || 0)); r.prs = Math.max(r.prs, +x.prs || 0); } });
+        g.ended = Date.now();
+        const pst = { id: rid(), by: id, ts: Date.now(), type: 'group', data: { min: mins, rows, unit: 'lb' }, reacts: {}, comments: [] };
+        if (rows.length >= 2) { this.p.unshift(pst); this.c.xp = (this.c.xp || 0) + 25 * rows.length; }
+        this.event('groupend', id, '*', { text: String(rows.length) }); await this.save(); this.broadcast({ t: 'group' }); this.broadcast({ t: 'refresh' });
+        return json({ ok: true, post: pst, ...this.view(id) });
       }
       case '/rename': { const n = clip(b.name, 30).trim(); if (this.c.owner === id && n) { const old = this.c.name; this.c.name = n; this.event('rename', id, '*', { text: n, old }); } break; }
       case '/crest': {
@@ -628,7 +746,7 @@ export class Crew {
   }
   setLive(id, b) {
     const now = Date.now(), prev = this.live[id];
-    if (b.on) { this.live[id] = { on: true, day: clip(b.day, 30), start: prev && prev.on ? prev.start : (+b.start || now), ts: now }; return; }
+    if (b.on) { this.live[id] = { on: true, day: clip(b.day, 30), start: prev && prev.on ? prev.start : (+b.start || now), ts: now, g: clip(b.g, 12) || (prev && prev.g) || '', sets: Math.max(0, Math.min(400, +b.sets || 0)), vol: Math.max(0, +b.vol || 0), ex: clip(b.ex, 40), rest: +b.rest || 0, prs: Math.max(0, Math.min(50, +b.prs || 0)), unit: b.unit === 'kg' ? 'kg' : 'lb' }; return; }
     if (prev && prev.on) {
       const s1 = prev.start, e1 = now; this.c.buddies = this.c.buddies || []; const today = isoD(now);
       for (const [oid, l] of Object.entries(this.live)) {
@@ -675,5 +793,41 @@ export class RestTimer {
     if (!endpoint) return;
     const s = await sendPush(endpoint, this.env);
     if (s === 404 || s === 410) await this.state.storage.deleteAll();
+  }
+}
+
+
+/* ---------- 0.15: app usage stats (owner dashboard) and OG numbers ---------- */
+export class Stats {
+  constructor(state, env) { this.state = state; this.env = env; }
+  async fetch(req) {
+    const path = new URL(req.url).pathname, s = this.state.storage, now = Date.now();
+    let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad json' }, 400); }
+    if (path === '/ping') {
+      const dev = String(b.dev || ''); if (!/^[\w-]{8,40}$/.test(dev)) return json({ error: 'bad device' }, 400);
+      const rec = (await s.get('dev:' + dev)) || { first: now, pings: 0 };
+      if (now - (rec.last || 0) < 20000) return json({ ok: true });
+      Object.assign(rec, { name: clip(b.name, 24), plat: clip(b.plat, 12), sa: !!b.sa, ver: clip(b.ver, 20), crew: clip(b.crew, 30), sync: !!b.sync, wk: Math.max(0, Math.min(99, +b.wk || 0)), tot: Math.max(0, +b.tot || 0), sets: Math.max(0, +b.sets || 0), vol: Math.max(0, +b.vol || 0), last: now, pings: (rec.pings || 0) + 1 });
+      await s.put('dev:' + dev, rec);
+      const d = isoD(now), day = (await s.get('day:' + d)) || {}; if (!day[dev]) { day[dev] = 1; await s.put('day:' + d, day); }
+      const idx = (await s.get('days')) || []; if (!idx.includes(d)) { idx.push(d); while (idx.length > 120) await s.delete('day:' + idx.shift()); await s.put('days', idx); }
+      return json({ ok: true });
+    }
+    if (path === '/og') {
+      const og = (await s.get('og')) || { n: 1, m: {} }, mid = clip(b.mid, 40);
+      if (!mid) return json({ og: null });
+      if (b.founder) { if (og.m[mid] !== 1) { for (const k of Object.keys(og.m)) if (og.m[k] === 1 && k !== mid) delete og.m[k]; og.m[mid] = 1; await s.put('og', og); } return json({ og: 1 }); }
+      if (!og.m[mid] && now < OG_CUTOFF) { og.n = Math.max(og.n || 1, 1) + 1; og.m[mid] = og.n; await s.put('og', og); }
+      return json({ og: og.m[mid] || null });
+    }
+    if (path === '/dash') {
+      const devs = []; for (const [k, v] of await s.list({ prefix: 'dev:' })) devs.push({ id: k.slice(4), ...v });
+      const idx = (await s.get('days')) || [], days = [];
+      for (const d of idx.slice(-30)) { const x = (await s.get('day:' + d)) || {}; days.push({ d, n: Object.keys(x).length, nw: devs.filter(v => isoD(v.first) === d).length }); }
+      const ago = t => now - (t || 0), within = ms => devs.filter(v => ago(v.last) < ms).length;
+      const ver = {}, plat = {}; devs.forEach(v => { ver[v.ver || '?'] = (ver[v.ver || '?'] || 0) + 1; plat[v.plat || '?'] = (plat[v.plat || '?'] || 0) + 1; });
+      return json({ total: devs.length, dau: within(DAY), wau: within(7 * DAY), mau: within(30 * DAY), home: devs.filter(v => v.sa).length, synced: devs.filter(v => v.sync).length, crews: new Set(devs.map(v => v.crew).filter(Boolean)).size, wkWorkouts: devs.filter(v => ago(v.last) < 7 * DAY).reduce((a, v) => a + (v.wk || 0), 0), totVol: devs.reduce((a, v) => a + (v.vol || 0), 0), ver, plat, days, devices: devs.sort((a, c) => (c.last || 0) - (a.last || 0)).slice(0, 300) });
+    }
+    return json({ error: 'not found' }, 404);
   }
 }
