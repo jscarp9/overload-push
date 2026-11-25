@@ -1,4 +1,4 @@
-// Overload server 0.15 (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
+// Overload server 0.16 (founder crew banner). 0.15: (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
 // Bindings: TIMER (RestTimer), CREW (Crew), VAULT (Vault). Secret: VAPID_PRIVATE.
 
 const ORIGIN = 'https://jscarp9.github.io';
@@ -322,7 +322,7 @@ function mergeSession(cur, inc) {
 /* ---------- Crew ---------- */
 const BANNERS = { steel: 1, ember: 2, ocean: 3, toxic: 5, royal: 7, gold: 10 };
 // 0.14 animated scene banners: unlocked by crew level (lv), crew rank (rank) or a crew trophy (trophy)
-const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 } };
+const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 }, founder: { founder: 1 } };
 const CREST = { shape: ['shield', 'plate', 'circle', 'hex'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'] };
 const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart', 'crest'];
 const CREW_RANK_PTS = [0, 400, 1200, 2500, 4500, 7500, 11500, 17000];
@@ -407,7 +407,7 @@ export class Crew {
     const bud = {}; (this.c.buddies || []).forEach(x => { if (x.a === me || x.b === me) { const o = x.a === me ? x.b : x.a; bud[o] = (bud[o] || 0) + 1; } });
     const mine = (this.c.buddies || []).filter(x => x.a === me || x.b === me).map(x => x.date);
     return {
-      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
+      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), fcrew: this.fcrew(), banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
       raid: this.raidView(), groups: this.groupView(), style: { motto: this.c.motto || '', c1: this.c.sc1 || '', c2: this.c.sc2 || '' }, pins: (this.c.pins || []).slice(0, 10), hof: (this.c.hof || []).slice(0, 40), nickVotes: Object.fromEntries(Object.entries(this.c.nickV || {}).map(([t, v]) => [t, v[me] || null])), respectGiven: Object.entries(this.c.respLog || {}).filter(([k]) => k.startsWith(isoD(Date.now()) + ':' + me + ':')).map(([k]) => k.split(':')[2]),
       former: Object.fromEntries(Object.entries(this.f).map(([k, v]) => [k, v.name])), trashN: this.t.filter(x => x.by === me || this.c.owner === me).length,
       members, posts: this.p.slice(0, 60), me, live: this.liveNow(), buddies: bud, buddyDates: mine,
@@ -415,6 +415,8 @@ export class Crew {
       votes: this.voteView(me),
     };
   }
+  // 0.16: a crew whose owner is the verified founder
+  fcrew() { const o = this.m && this.m[this.c.owner]; return !!(o && o.ok && o.profile && o.profile.founder); }
   nickOf(id) { const V = (this.c.nickV || {})[id]; if (!V) return ''; const t = {}; Object.values(V).forEach(n => t[n] = (t[n] || 0) + 1); const best = Object.entries(t).sort((a, b2) => b2[1] - a[1])[0]; const need = Math.max(1, Math.ceil((Object.keys(this.m).length - 1) / 2)); return best && best[1] >= need ? best[0] : ''; }
   raidNow() {
     const d = isoD(Date.now()), wk = monday(d), i = ((wkIndex(wk) % BOSSES.length) + BOSSES.length) % BOSSES.length, n = Math.max(2, Object.keys(this.m).length);
@@ -719,7 +721,7 @@ export class Crew {
       }
       case '/banner': {
         const k = clip(b.banner, 12), sc = SCENES[k], lv = crewLevel(this.c.xp);
-        const ok = sc ? ((sc.lv && lv >= sc.lv) || (sc.rank && (this.c.rank || 0) >= sc.rank) || (sc.trophy && (this.c.trophies || {})[sc.trophy])) : (BANNERS[k] && lv >= BANNERS[k]);
+        const ok = sc ? ((sc.lv && lv >= sc.lv) || (sc.rank && (this.c.rank || 0) >= sc.rank) || (sc.trophy && (this.c.trophies || {})[sc.trophy]) || (sc.founder && this.fcrew())) : (BANNERS[k] && lv >= BANNERS[k]);
         if (this.c.owner === id && ok) this.c.banner = k; break;
       }
       case '/vote': {
