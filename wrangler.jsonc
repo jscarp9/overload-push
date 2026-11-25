@@ -3,7 +3,13 @@
   "main": "worker.js",
   "compatibility_date": "2026-11-01",
   "durable_objects": {
-    "bindings": [{ "name": "TIMER", "class_name": "RestTimer" }]
+    "bindings": [
+      { "name": "TIMER", "class_name": "RestTimer" },
+      { "name": "CREW", "class_name": "Crew" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RestTimer"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RestTimer"] },
+    { "tag": "v2", "new_sqlite_classes": ["Crew"] }
+  ]
 }
