@@ -1,4 +1,4 @@
-// Overload server 0.16 (founder crew banner). 0.15: (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
+// Overload server 0.18 (co-founder, crest builder, reports). 0.16: founder crew banner. 0.15: (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
 // Bindings: TIMER (RestTimer), CREW (Crew), VAULT (Vault). Secret: VAPID_PRIVATE.
 
 const ORIGIN = 'https://jscarp9.github.io';
@@ -232,12 +232,14 @@ export class Vault {
     if (path === '/isfounder') return json({ founder: !!(meta && meta.founder) });
     if (path === '/founder') {
       if (!meta) return json({ error: 'auth' }, 403);
-      if ((await sha('founder:' + String(b.code || '').trim().toUpperCase())) !== FOUNDER_HASH) return json({ error: 'wrong code' }, 400);
-      meta.founder = true; await s.put('meta', meta); return json({ ok: true, founder: true });
+      const code = String(b.code || '').trim().toUpperCase();
+      if ((await sha('founder:' + code)) === FOUNDER_HASH) { meta.founder = true; await s.put('meta', meta); return json({ ok: true, founder: true }); }
+      if ((await sha('cofounder:' + code)) === COFOUNDER_HASH) { meta.cofounder = true; await s.put('meta', meta); return json({ ok: true, cofounder: true }); }
+      return json({ error: 'wrong code' }, 400);
     }
     if (path === '/stats') {
       if (!meta) return json({ error: 'auth' }, 403);
-      return json({ ...computeStats(await this.sessions(), clip(b.today, 10) || isoD(Date.now()), ((await s.get('i:settings')) || {}).unit), founder: !!meta.founder });
+      return json({ ...computeStats(await this.sessions(), clip(b.today, 10) || isoD(Date.now()), ((await s.get('i:settings')) || {}).unit), founder: !!meta.founder, cofounder: !!meta.cofounder });
     }
     if (!meta) return json({ error: 'auth' }, 403);
     switch (path) {
@@ -323,11 +325,12 @@ function mergeSession(cur, inc) {
 const BANNERS = { steel: 1, ember: 2, ocean: 3, toxic: 5, royal: 7, gold: 10 };
 // 0.14 animated scene banners: unlocked by crew level (lv), crew rank (rank) or a crew trophy (trophy)
 const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 }, founder: { founder: 1 } };
-const CREST = { shape: ['shield', 'plate', 'circle', 'hex'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'] };
+const CREST = { shape: ['shield', 'kite', 'seal', 'hex', 'plate', 'circle'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'], emb: ['barbells', 'bull', 'wolf', 'eagle', 'skull', 'kettle', 'crown', 'bolt', 'flame', 'star', 'lion'], pat: ['plain', 'chevron', 'stripes', 'split', 'quarter'], metal: ['steel', 'bronze', 'silver', 'gold', 'black', 'founders'], border: ['plain', 'rope', 'studs'] };
 const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart', 'crest'];
 const CREW_RANK_PTS = [0, 400, 1200, 2500, 4500, 7500, 11500, 17000];
 // 0.15
 const FOUNDER_HASH = '28f8f69ed443c0fb11e41c2961f3d72f1958675f2bdcc62ed3e541049bad9466'; // sha256('founder:' + secret code); only the hash is public
+const COFOUNDER_HASH = 'e1e7f05b8295750018f484e0c80bfad54c26e30a56586c3bd94ddddcee159228'; // sha256('cofounder:' + secret code); only the hash is public
 const OG_CUTOFF = Date.UTC(2027, 11, 31); // OG numbers for everyone who joins before the App Store launch
 const BOSSES = [['titan', 'The Iron Titan'], ['golem', 'Plate Golem'], ['hydra', 'Rack Hydra'], ['kraken', 'Deadlift Kraken'], ['dragon', 'Dumbbell Dragon'], ['minotaur', 'Bench Minotaur'], ['yeti', 'Squat Yeti'], ['phoenix', 'Cardio Phoenix']];
 const BOSS_HP_PER = 45000; // lb per member, at least 2 members
@@ -407,7 +410,7 @@ export class Crew {
     const bud = {}; (this.c.buddies || []).forEach(x => { if (x.a === me || x.b === me) { const o = x.a === me ? x.b : x.a; bud[o] = (bud[o] || 0) + 1; } });
     const mine = (this.c.buddies || []).filter(x => x.a === me || x.b === me).map(x => x.date);
     return {
-      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), fcrew: this.fcrew(), banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
+      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), fcrew: this.fcrew(), reports: this.c.owner === me ? (this.c.reports || []).slice(-20) : undefined, banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
       raid: this.raidView(), groups: this.groupView(), style: { motto: this.c.motto || '', c1: this.c.sc1 || '', c2: this.c.sc2 || '' }, pins: (this.c.pins || []).slice(0, 10), hof: (this.c.hof || []).slice(0, 40), nickVotes: Object.fromEntries(Object.entries(this.c.nickV || {}).map(([t, v]) => [t, v[me] || null])), respectGiven: Object.entries(this.c.respLog || {}).filter(([k]) => k.startsWith(isoD(Date.now()) + ':' + me + ':')).map(([k]) => k.split(':')[2]),
       former: Object.fromEntries(Object.entries(this.f).map(([k, v]) => [k, v.name])), trashN: this.t.filter(x => x.by === me || this.c.owner === me).length,
       members, posts: this.p.slice(0, 60), me, live: this.liveNow(), buddies: bud, buddyDates: mine,
@@ -521,10 +524,11 @@ export class Crew {
               p.power = Math.round(p.rank * 120 + (p.rank < 7 ? (3 - (+p.div || 3)) * 40 : 0) + (+p.pres || 0) * 100 + st.active * 6 + p.bcount * 3 + st.lifePR * 2 + p.streak * 4);
               me.ok = true;
               if (st.founder) p.founder = 1; else delete p.founder;
+              if (st.cofounder && !st.founder) p.cofounder = 1; else delete p.cofounder;
             }
           } catch (e) {}
         }
-        if (p && !me.ok) delete p.founder;
+        if (p && !me.ok) { delete p.founder; delete p.cofounder; }
         if (p) {
           if (!me.og && this.env.STATS) { try { const r = await this.env.STATS.get(this.env.STATS.idFromName('global')).fetch('https://do/og', { method: 'POST', body: JSON.stringify({ mid: id, founder: !!p.founder }) }); const j = await r.json(); if (j.og) me.og = j.og; } catch (e) {} }
           if (p.founder && me.og !== 1 && this.env.STATS) { try { const r = await this.env.STATS.get(this.env.STATS.idFromName('global')).fetch('https://do/og', { method: 'POST', body: JSON.stringify({ mid: id, founder: true }) }); const j = await r.json(); if (j.og) me.og = j.og; } catch (e) {} }
@@ -661,8 +665,14 @@ export class Crew {
         return json({ ok: true, post: pst, ...this.view(id) });
       }
       case '/rename': { const n = clip(b.name, 30).trim(); if (this.c.owner === id && n) { const old = this.c.name; this.c.name = n; this.event('rename', id, '*', { text: n, old }); } break; }
+      case '/report': {
+        const R = this.c.reports || (this.c.reports = []);
+        R.push({ ts: Date.now(), by: id, target: clip(b.target, 40), post: clip(b.post, 40), why: clip(b.why, 120) });
+        if (R.length > 60) R.splice(0, R.length - 60);
+        break;
+      }
       case '/crest': {
-        if (this.c.owner === id) { const c = b.crest || {}; this.c.crest = { shape: CREST.shape.includes(c.shape) ? c.shape : 'shield', icon: CREST.icon.includes(c.icon) ? c.icon : 'barbell', c1: /^#[0-9a-f]{6}$/i.test(c.c1) ? c.c1 : '#ef2b36', c2: /^#[0-9a-f]{6}$/i.test(c.c2) ? c.c2 : '#14161c', txt: clip(c.txt, 3).toUpperCase().replace(/[^A-Z0-9]/g, '') }; }
+        if (this.c.owner === id) { const c = b.crest || {}; this.c.crest = { shape: CREST.shape.includes(c.shape) ? c.shape : 'shield', icon: CREST.icon.includes(c.icon) ? c.icon : 'barbell', c1: /^#[0-9a-f]{6}$/i.test(c.c1) ? c.c1 : '#ef2b36', c2: /^#[0-9a-f]{6}$/i.test(c.c2) ? c.c2 : '#14161c', txt: clip(c.txt, 3).toUpperCase().replace(/[^A-Z0-9]/g, ''), emb: CREST.emb.includes(c.emb) ? c.emb : 'barbells', pat: CREST.pat.includes(c.pat) ? c.pat : 'plain', metal: CREST.metal.includes(c.metal) && (c.metal !== 'founders' || this.fcrew()) ? c.metal : 'steel', border: CREST.border.includes(c.border) ? c.border : 'plain', rib: clip(c.rib, 26).toUpperCase().replace(/[^A-Z0-9 &'!.\u00b7-]/g, ''), v: 2 }; }
         break;
       }
       case '/shame': {
