@@ -1,4 +1,4 @@
-// Overload server 0.18 (co-founder, crest builder, reports). 0.16: founder crew banner. 0.15: (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
+// Overload server 0.19 (holiday drops). 0.18: co-founder, crest builder, reports. 0.16: founder crew banner. 0.15: (raids, lift together, profiles, founder, OG, stats). Previously 0.14: rest alerts, crew (chat, trophies, scenes, trash, daily backups), accounts and cloud sync. © 2026 Jake Scarpa. All rights reserved.
 // Bindings: TIMER (RestTimer), CREW (Crew), VAULT (Vault). Secret: VAPID_PRIVATE.
 
 const ORIGIN = 'https://jscarp9.github.io';
@@ -324,9 +324,18 @@ function mergeSession(cur, inc) {
 /* ---------- Crew ---------- */
 const BANNERS = { steel: 1, ember: 2, ocean: 3, toxic: 5, royal: 7, gold: 10 };
 // 0.14 animated scene banners: unlocked by crew level (lv), crew rank (rank) or a crew trophy (trophy)
-const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 }, founder: { founder: 1 } };
+const SCENES = { forge: { lv: 1 }, city: { lv: 2 }, ocean2: { lv: 3 }, gym: { lv: 4 }, aurora: { lv: 6 }, volcano: { lv: 8 }, colosseum: { rank: 3 }, space: { rank: 5 }, thunder: { trophy: 'mpc' }, olympus: { rank: 7 }, founder: { founder: 1 }, hb_thanks: { hol: 'thanks' }, hb_xmas: { hol: 'xmas' }, hb_newyear: { hol: 'newyear' }, hb_valentine: { hol: 'valentine' }, hb_stpat: { hol: 'stpat' }, hb_easter: { hol: 'easter' }, hb_july4: { hol: 'july4' }, hb_halloween: { hol: 'halloween' } };
 const CREST = { shape: ['shield', 'kite', 'seal', 'hex', 'plate', 'circle'], icon: ['barbell', 'skull', 'crown', 'bolt', 'wolf', 'flame', 'star', 'none'], emb: ['barbells', 'bull', 'wolf', 'eagle', 'skull', 'kettle', 'crown', 'bolt', 'flame', 'star', 'lion'], pat: ['plain', 'chevron', 'stripes', 'split', 'quarter'], metal: ['steel', 'bronze', 'silver', 'gold', 'black', 'founders'], border: ['plain', 'rope', 'studs'] };
-const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart', 'crest'];
+const REACTS = ['fire', 'muscle', 'trophy', 'clap', 'goat', 'rocket', 'skull', 'crown', 'lol', 'heart', 'crest', 'hthanks', 'hxmas', 'hnewyear', 'hvalentine', 'hstpat', 'heaster', 'hjuly4', 'hhalloween'];
+// 0.19 holidays: the server works out each holiday's date itself
+function easterOf(y) { const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3), h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451); const mo = Math.floor((h + l - 7 * m + 114) / 31), da = ((h + l - 7 * m + 114) % 31) + 1; return Date.UTC(y, mo - 1, da); }
+function holidayDate(k, y) {
+  if (k === 'thanks') { const d = new Date(Date.UTC(y, 10, 1)); const off = (4 - d.getUTCDay() + 7) % 7; return Date.UTC(y, 10, 1 + off + 21); }
+  if (k === 'easter') return easterOf(y);
+  const F = { xmas: [11, 25], newyear: [0, 1], valentine: [1, 14], stpat: [2, 17], july4: [6, 4], halloween: [9, 31] }[k];
+  return F ? Date.UTC(y, F[0], F[1]) : null;
+}
+const HOLIDAYS = ['thanks', 'xmas', 'newyear', 'valentine', 'stpat', 'easter', 'july4', 'halloween'];
 const CREW_RANK_PTS = [0, 400, 1200, 2500, 4500, 7500, 11500, 17000];
 // 0.15
 const FOUNDER_HASH = '28f8f69ed443c0fb11e41c2961f3d72f1958675f2bdcc62ed3e541049bad9466'; // sha256('founder:' + secret code); only the hash is public
@@ -410,7 +419,7 @@ export class Crew {
     const bud = {}; (this.c.buddies || []).forEach(x => { if (x.a === me || x.b === me) { const o = x.a === me ? x.b : x.a; bud[o] = (bud[o] || 0) + 1; } });
     const mine = (this.c.buddies || []).filter(x => x.a === me || x.b === me).map(x => x.date);
     return {
-      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), fcrew: this.fcrew(), reports: this.c.owner === me ? (this.c.reports || []).slice(-20) : undefined, banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
+      crew: { name: this.c.name, code: this.c.code, owner: this.c.owner, created: this.c.created, challenge: this.c.challenge || null, xp: this.c.xp || 0, level: crewLevel(this.c.xp), fcrew: this.fcrew(), holU: this.c.holU || {}, hol: this.c.hol || {}, reports: this.c.owner === me ? (this.c.reports || []).slice(-20) : undefined, banner: this.c.banner || 'forge', crest: this.c.crest || null, trophies: this.c.trophies || {}, rank: this.c.rank || 0, founders: this.c.created < Date.UTC(2027, 0, 1), shame: this.c.shame && this.c.shame.until > Date.now() ? this.c.shame : null, shameVotes: this.shameView(me), chatN: this.c.chatN || 0, chatLast: this.c.chatLast || 0, chatRecent: (this.c.chatRecent || []).slice(-40), muted: this.c.muted || {} },
       raid: this.raidView(), groups: this.groupView(), style: { motto: this.c.motto || '', c1: this.c.sc1 || '', c2: this.c.sc2 || '' }, pins: (this.c.pins || []).slice(0, 10), hof: (this.c.hof || []).slice(0, 40), nickVotes: Object.fromEntries(Object.entries(this.c.nickV || {}).map(([t, v]) => [t, v[me] || null])), respectGiven: Object.entries(this.c.respLog || {}).filter(([k]) => k.startsWith(isoD(Date.now()) + ':' + me + ':')).map(([k]) => k.split(':')[2]),
       former: Object.fromEntries(Object.entries(this.f).map(([k, v]) => [k, v.name])), trashN: this.t.filter(x => x.by === me || this.c.owner === me).length,
       members, posts: this.p.slice(0, 60), me, live: this.liveNow(), buddies: bud, buddyDates: mine,
@@ -665,6 +674,16 @@ export class Crew {
         return json({ ok: true, post: pst, ...this.view(id) });
       }
       case '/rename': { const n = clip(b.name, 30).trim(); if (this.c.owner === id && n) { const old = this.c.name; this.c.name = n; this.event('rename', id, '*', { text: n, old }); } break; }
+      case '/holiday': {
+        // a member trained on a holiday; 3 members on the same holiday unlock it for the whole crew
+        const k = String(b.hk || ''), y = +b.year;
+        if (!HOLIDAYS.includes(k) || !(y >= 2026 && y <= 2100)) break;
+        const day = holidayDate(k, y); if (!day || Math.abs(Date.now() - (day + 12 * 36e5)) > 40 * 36e5) break;
+        const H = this.c.hol || (this.c.hol = {}), key = k + '_' + y, a = H[key] || (H[key] = []);
+        if (!a.includes(id)) a.push(id);
+        if (a.length >= 3) { const U = this.c.holU || (this.c.holU = {}); U[k] = Math.max(U[k] || 0, y); }
+        break;
+      }
       case '/report': {
         const R = this.c.reports || (this.c.reports = []);
         R.push({ ts: Date.now(), by: id, target: clip(b.target, 40), post: clip(b.post, 40), why: clip(b.why, 120) });
@@ -731,7 +750,7 @@ export class Crew {
       }
       case '/banner': {
         const k = clip(b.banner, 12), sc = SCENES[k], lv = crewLevel(this.c.xp);
-        const ok = sc ? ((sc.lv && lv >= sc.lv) || (sc.rank && (this.c.rank || 0) >= sc.rank) || (sc.trophy && (this.c.trophies || {})[sc.trophy]) || (sc.founder && this.fcrew())) : (BANNERS[k] && lv >= BANNERS[k]);
+        const ok = sc ? ((sc.lv && lv >= sc.lv) || (sc.rank && (this.c.rank || 0) >= sc.rank) || (sc.trophy && (this.c.trophies || {})[sc.trophy]) || (sc.founder && this.fcrew()) || (sc.hol && (this.c.holU || {})[sc.hol])) : (BANNERS[k] && lv >= BANNERS[k]);
         if (this.c.owner === id && ok) this.c.banner = k; break;
       }
       case '/vote': {
