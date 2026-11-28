@@ -203,7 +203,7 @@ function computeStats(sessions, todayIso, unit) {
 
 
 /* ---------- 0.23: Overload AI (plan builder + coach notes) ---------- */
-const AI_LIMITS = { plan: 4, recap: 6, weekly: 2, chat: 25, cue: 15 }, AI_GLOBAL = { plan: 200, recap: 800, weekly: 400, chat: 1500, cue: 300 };
+const AI_LIMITS = { plan: 4, recap: 6, weekly: 2, chat: 25, cue: 15, monthly: 2 }, AI_GLOBAL = { plan: 200, recap: 800, weekly: 400, chat: 1500, cue: 300, monthly: 300 };
 const AI_TYPES = ['up', 'leg', 'full', 'arm', 'other', 'off'];
 const AI_MUSCLES = ['Chest', 'Back', 'Shoulders', 'Side delts', 'Rear delts', 'Biceps', 'Triceps', 'Forearms', 'Traps', 'Quads', 'Hamstrings', 'Glutes', 'Calves', 'Abs', 'Lower back', 'Other'];
 const aiOn = env => !!env.ANTHROPIC_KEY && env.AI_OFF !== '1';
@@ -318,6 +318,7 @@ async function aiRun(self, meta, path, b) {
   if (await aiResting(env)) return json({ error: 'Overload AI used up this month’s budget. It’s back on the 1st.', resting: true }, 503);
   // cached answers never count twice
   if (kind === 'recap') { const c = (await s.get('ai:recaps')) || {}; const sid = clip(b.sid, 40); if (!sid) return json({ error: 'bad workout' }, 400); if (c[sid]) return json({ text: c[sid], cached: true }); }
+  if (kind === 'monthly') { const c = (await s.get('ai:monthly')) || {}; const mo = clip(b.mo, 7); if (!/^\d{4}-\d\d$/.test(mo)) return json({ error: 'bad month' }, 400); if (c[mo]) return json({ text: c[mo], cached: true }); }
   if (kind === 'weekly') { const c = (await s.get('ai:weekly')) || {}; const wk = clip(b.wk, 10); if (!/^\d{4}-\d\d-\d\d$/.test(wk)) return json({ error: 'bad week' }, 400); if (c[wk]) return json({ text: c[wk], cached: true }); }
   if (!left(kind)) return json({ error: kind === 'plan' ? `That’s ${AI_LIMITS.plan} builds today. Try again tomorrow.` : kind === 'chat' ? `That’s ${AI_LIMITS.chat} messages today. Coach is back tomorrow.` : 'Coach is resting until tomorrow.', limit: true, left: 0 }, 429);
   if (env.STATS) { const g = await env.STATS.get(env.STATS.idFromName('global')).fetch('https://do/aiuse', { method: 'POST', body: JSON.stringify({ kind, day, cap: +env.AI_GLOBAL_CAP || AI_GLOBAL[kind] }) }).then(r => r.json()).catch(() => ({ ok: true })); if (!g.ok) return json({ error: 'Overload AI is busy today. Try again tomorrow.', limit: true }, 429); }
@@ -347,6 +348,13 @@ async function aiRun(self, meta, path, b) {
       const w = { week_of: clip(b.wk, 10), workouts: num(b.n, 0, 30, 0), planned_days: num(b.planned, 0, 7, 0), sets: num(b.sets, 0, 999, 0), volume: Math.round(+b.vol || 0), unit: b.unit === 'kg' ? 'kg' : 'lb', prs: (b.prs || []).slice(0, 10).map(x => clip(x, 40)), lifts: (b.lifts || []).slice(0, 12).map(l => ({ n: clip(l.n, 40), best_e1rm: +l.e || 0, weeks: (l.h || []).slice(0, 6).map(x => +x || 0) })), muscles: Object.fromEntries(Object.entries(b.mus || {}).slice(0, 16).map(([k, v]) => [clip(k, 14), num(v, 0, 99, 0)])) };
       const text = clip(await claude(env, { system: COACH_SYS, content: [{ type: 'text', text: `Write a coach note for last week in 3 short sentences, under 60 words: how the week went, one lift that is stalling or rising (use the weekly e1RM history, oldest first), and one clear thing to do this week.\nWEEK ${tag(w)}` }], max: 200 }), 500);
       const wk = clip(b.wk, 10), c = (await s.get('ai:weekly')) || {}; c[wk] = text; const ks = Object.keys(c).sort(); while (ks.length > 12) delete c[ks.shift()]; await s.put('ai:weekly', c);
+      return json({ text });
+    }
+    if (kind === 'monthly') {
+      const m = { last_30_days: { workouts: num(b.n, 0, 60, 0), sets: num(b.sets, 0, 3000, 0), volume: Math.round(+b.vol || 0), prs: num(b.prs, 0, 500, 0) }, previous_30_days: { workouts: num(b.pn, 0, 60, 0), sets: num(b.psets, 0, 3000, 0), volume: Math.round(+b.pvol || 0) }, unit: b.unit === 'kg' ? 'kg' : 'lb',
+        lifts: (b.lifts || []).slice(0, 10).map(l => ({ n: clip(l.n, 40), e1rm_now: +l.e || 0, e1rm_30_days_ago: +l.p || 0 })), sets_per_muscle_30_days: Object.fromEntries(Object.entries(b.mus || {}).slice(0, 16).map(([k, v]) => [clip(k, 14), num(v, 0, 999, 0)])) };
+      const text = clip(await claude(env, { system: COACH_SYS, content: [{ type: 'text', text: `Write a short note for this lifter's profile about their last 30 days: exactly 2 short sentences, under 40 words. First, their strongest area or best trend, with a number. Second, what is falling behind (a muscle with few sets, or a stalled lift) and one simple fix. No greeting, no emojis.\nMONTH ${tag(m)}` }], max: 140 }), 300);
+      const mo = clip(b.mo, 7), c = (await s.get('ai:monthly')) || {}; c[mo] = text; const ks = Object.keys(c).sort(); while (ks.length > 6) delete c[ks.shift()]; await s.put('ai:monthly', c);
       return json({ text });
     }
     if (kind === 'chat') {
