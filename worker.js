@@ -522,6 +522,7 @@ const BOSSES = [['titan', 'The Iron Titan'], ['golem', 'Plate Golem'], ['hydra',
 const BOSS_HP_PER = 45000; // lb per member, at least 2 members
 const ROLES = ['Captain', 'Co-captain', 'Hype Man', 'Spotter', 'Coach', 'Rookie', 'Legend', 'Enforcer', 'Comedian'];
 const wkIndex = d => Math.floor((toDate(d) - Date.UTC(2026, 0, 5)) / (7 * DAY));
+const PHOTO_KEEP = 183 * 864e5, PHOTO_DAY = 10, PHOTO_MAX = 4000, PHOTO_BYTES = 300000;
 const DAY = 864e5, TRASH_KEEP = 30 * DAY, ARCHIVE_KEEP = 90 * DAY, CREW_SNAPS = 30, PAGE = 100;
 const crewRankOf = c => { const pts = (c.xp || 0) + Object.keys(c.trophies || {}).length * 400; let r = 0; CREW_RANK_PTS.forEach((t, i) => { if (pts >= t) r = i; }); return r; };
 const toLb = (v, u) => u === 'kg' ? v * 2.20462 : v;
@@ -545,6 +546,7 @@ export class Crew {
     // posts are never dropped: overflow goes to archive pages
     if (this.p.length > 150) { const old = this.p.splice(150); this.c.pArch = this.c.pArch || 0; let pg = (await s.get('pa:' + this.c.pArch)) || []; for (const x of old) { pg.push(x); if (pg.length >= PAGE) { await s.put('pa:' + this.c.pArch, pg); this.c.pArch++; pg = []; } } await s.put('pa:' + this.c.pArch, pg); }
     const now = Date.now(); this.t = this.t.filter(x => now - x.ts < TRASH_KEEP).slice(0, 3000);
+    if (this.c && Array.isArray(this.c.ph)) { const keep = []; for (const x of this.c.ph) { if (now > x.exp || (x.del && now - x.del > TRASH_KEEP)) { try { await s.delete('ph:' + x.pid); } catch (e) {} } else keep.push(x); } this.c.ph = keep; }
     await s.put('crew', this.c); await s.put('members', this.m); await s.put('posts', this.p); await s.put('events', this.ev); await s.put('live', this.live); await s.put('trash', this.t); await s.put('former', this.f);
     for (const [n, arr] of Object.entries(this.cp)) if (arr && arr._dirty) { delete arr._dirty; await s.put('cp:' + n, arr); }
   }
@@ -651,7 +653,7 @@ export class Crew {
     }
     let b; try { b = await req.json(); } catch (e) { return json({ error: 'bad json' }, 400); }
     if (JSON.stringify(b).length > 60000) return json({ error: 'too big' }, 413);
-    if (this.c && path !== '/state' && path !== '/latest' && path !== '/chat/get') { try { await this.snapshot(); } catch (e) {} }
+    if (this.c && path !== '/state' && path !== '/latest' && path !== '/chat/get' && path !== '/photo/get') { try { await this.snapshot(); } catch (e) {} }
     if (path === '/create') {
       if (this.c) return json({ error: 'taken' }, 409);
       const id = clip(b.id, 40), key = clip(b.key, 80);
@@ -729,10 +731,33 @@ export class Crew {
       case '/post': {
         const t = b.post && b.post.type === 'rank' ? 'rank' : 'workout';
         const p = { id: rid(), by: id, ts: Date.now(), type: t, cap: clip(b.post && b.post.cap, 280), data: b.post && b.post.data || null, reacts: {}, comments: [] };
+        if (t === 'workout' && b.post && b.post.photo) { const ph = (this.c.ph || []).find(x => x.pid === clip(b.post.photo, 24)); if (ph && ph.by === id && !ph.del) p.photo = { pid: ph.pid, exp: ph.exp }; }
+        if (p.data && typeof p.data.coach === 'string') p.data.coach = clip(p.data.coach.replace(/[<>]/g, ''), 400);
         this.p.unshift(p);
         this.c.xp = (this.c.xp || 0) + 5;
         if (t === 'rank') this.event('rank', id, '*', { text: clip(p.data && p.data.rname, 30) });
         await this.notify(id, t === 'rank' ? `${me.name} ranked up` : `${me.name} posted a workout`);
+        break;
+      }
+      case '/photo/up': {
+        const img = typeof b.img === 'string' ? b.img : '';
+        if (!img || img.length > PHOTO_BYTES || !img.startsWith('/9j/') || !/^[A-Za-z0-9+/=]+$/.test(img)) return json({ error: 'bad photo' }, 400);
+        const P = this.c.ph = this.c.ph || [], now = Date.now();
+        if (P.filter(x => x.by === id && now - x.ts < DAY).length >= PHOTO_DAY) return json({ error: 'That’s ' + PHOTO_DAY + ' photos today. Try again tomorrow.', limit: true }, 429);
+        if (P.filter(x => !x.del).length >= PHOTO_MAX) return json({ error: 'Your crew is out of photo space.', full: true }, 429);
+        const pid = rid() + rid(); await this.state.storage.put('ph:' + pid, img);
+        P.push({ pid, by: id, ts: now, exp: now + PHOTO_KEEP }); changed = false; await this.save();
+        return json({ ok: true, pid, exp: now + PHOTO_KEEP });
+      }
+      case '/photo/get': {
+        const x = (this.c.ph || []).find(q => q.pid === clip(b.pid, 24));
+        if (!x || x.del || Date.now() > x.exp) return json({ gone: true });
+        const img = await this.state.storage.get('ph:' + x.pid);
+        return json(img ? { img, exp: x.exp, by: x.by } : { gone: true });
+      }
+      case '/photo/del': {
+        const x = (this.c.ph || []).find(q => q.pid === clip(b.pid, 24));
+        if (x && !x.del && (x.by === id || this.c.owner === id)) { x.del = Date.now(); this.t.unshift({ id: rid(), kind: 'photo', by: x.by, delBy: id, ts: Date.now(), pid: x.pid, text: 'Workout photo' }); }
         break;
       }
       case '/react': {
@@ -762,6 +787,7 @@ export class Crew {
         const i = this.t.findIndex(x => x.id === b.item); const x = this.t[i];
         if (x && (x.by === id || this.c.owner === id)) {
           if (x.kind === 'post') { if (!this.p.some(q => q.id === x.item.id)) { this.p.push(x.item); this.p.sort((a, c2) => c2.ts - a.ts); } }
+          if (x.kind === 'photo') { const q = (this.c.ph || []).find(z => z.pid === x.pid); if (q) q.del = null; }
           if (x.kind === 'msg') { const f = await this.findMsg(x.mid); if (f) { f.m.text = x.text; f.m.card = x.card || null; delete f.m.del; f.pg._dirty = 1; this.broadcast({ t: 'chatupd', msg: f.m }); } }
           this.t.splice(i, 1);
         }
